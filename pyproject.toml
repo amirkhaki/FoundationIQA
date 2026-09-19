@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foundation_hybrid_iqa"
+version = "0.1.0"
+description = "Foundation Hybrid IQA Ablation Suite"
+dependencies = [
+    "torch",
+    "torchvision",
+    "pyiqa"
+]
+
+[project.entry-points."pyiqa.archs"]
+foundation_hybrid = "foundation_hybrid.arch:register"
+
+[project.scripts]
+run-ablations = "foundation_hybrid.run_ablations:main"
