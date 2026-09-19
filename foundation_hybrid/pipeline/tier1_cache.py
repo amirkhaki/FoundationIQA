@@ -34,43 +34,53 @@ def run_tier1_cache(datasets, output_dir="raw/"):
         print(f"Caching dataset: {dataset_name}")
         dataset = pyiqa.load_dataset(dataset_name)
         
-        cache_data = []
+        # LIVE has variable image sizes, so it needs batch_size=1 unless custom collate is used.
+        bs = 1 if dataset_name.lower() == 'live' else 8
         
-        for i in tqdm(range(len(dataset))):
-            data = dataset[i]
-            dist_img = data['img'].unsqueeze(0).to(device)
+        # DataLoader for fast parallel loading and batching
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=bs, shuffle=False, num_workers=4, pin_memory=True
+        )
+        
+        cache_data = []
+        idx_counter = 0
+        
+        for data in tqdm(dataloader):
+            dist_img = data['img'].to(device)
             if 'ref_img' in data:
-                ref_img = data['ref_img'].unsqueeze(0).to(device)
+                ref_img = data['ref_img'].to(device)
             else:
-                # Fallback if some dataset uses 'ref'
-                ref_img = data['ref'].unsqueeze(0).to(device)
+                ref_img = data['ref'].to(device)
                 
-            mos = data.get('mos_label', data.get('mos', data.get('dmos', 0)))
-            if isinstance(mos, torch.Tensor):
-                mos = mos.item()
-                
-            # Some datasets have distortion types
-            dist_type = data.get('distortion_type', 'unknown')
+            mos_batch = data.get('mos_label', data.get('mos', data.get('dmos', torch.zeros(dist_img.shape[0]))))
+            dist_type_batch = data.get('distortion_type', ['unknown'] * dist_img.shape[0])
             
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.float16):
                 cache = model(ref_img, dist_img)
                 
-            # Move cache to CPU and convert to numpy for serialization
-            cpu_cache = {}
-            for view, view_cache in cache.items():
-                cpu_cache[view] = {"dino": [], "cnn": []}
-                for l in view_cache["dino"]:
-                    cpu_cache[view]["dino"].append({k: v.cpu().numpy() for k, v in l.items()})
-                for l in view_cache["cnn"]:
-                    cpu_cache[view]["cnn"].append({k: v.cpu().numpy() for k, v in l.items()})
-                    
-            cache_data.append({
-                "idx": i,
-                "mos": float(mos),
-                "dist_type": dist_type,
-                "cache": cpu_cache
-            })
+            B = dist_img.shape[0]
             
+            # Split the batch back into individual items
+            for b in range(B):
+                cpu_cache = {}
+                for view, view_cache in cache.items():
+                    cpu_cache[view] = {"dino": [], "cnn": []}
+                    for l in view_cache["dino"]:
+                        cpu_cache[view]["dino"].append({k: v[b].cpu().numpy() for k, v in l.items()})
+                    for l in view_cache["cnn"]:
+                        cpu_cache[view]["cnn"].append({k: v[b].cpu().numpy() for k, v in l.items()})
+                        
+                mos_val = mos_batch[b].item() if isinstance(mos_batch, torch.Tensor) else mos_batch[b]
+                dtype_val = dist_type_batch[b] if isinstance(dist_type_batch, list) or isinstance(dist_type_batch, tuple) else dist_type_batch
+                
+                cache_data.append({
+                    "idx": idx_counter,
+                    "mos": float(mos_val),
+                    "dist_type": dtype_val,
+                    "cache": cpu_cache
+                })
+                idx_counter += 1
+                
         np.save(os.path.join(output_dir, f"{dataset_name}_cache.npy"), cache_data, allow_pickle=True)
         print(f"Saved {dataset_name}_cache.npy")
 
