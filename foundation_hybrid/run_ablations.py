@@ -103,6 +103,7 @@ def main():
     parser.add_argument("--skip-cache", action="store_true", help="Skip Tier-1 caching if already done")
     
     args = parser.parse_args()
+    args.datasets = [d.lower() for d in args.datasets]
     
     os.makedirs(args.out_dir, exist_ok=True)
     
