@@ -116,7 +116,9 @@ class FoundationHybrid(nn.Module):
                  texture_crops_k=1,
                  texture_agg='mean',
                  texture_var_ws=7,
-                 pyramid_mode=False
+                 pyramid_mode=False,
+                 return_cache=False,
+                 **kwargs
                  ):
         super().__init__()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -127,6 +129,7 @@ class FoundationHybrid(nn.Module):
         self.pf = pf
         self.xi = xi
         self.multiscale = multiscale
+        self.return_cache = return_cache
         
         self.dino_score_terms = dino_score_terms
         self.dino_patch_cos_mode = dino_patch_cos_mode
@@ -267,6 +270,8 @@ class FoundationHybrid(nn.Module):
         if sum(lws) == 0:
             lws = [1.0/len(lws)] * len(lws)
             
+        dino_cache = []
+            
         for (fr, fd, cr, cd), lw in zip(zip(maps_r, maps_d, cls_r, cls_d), lws):
             dists_score = patch_cos_score = cls_score = 0.0
             
@@ -292,6 +297,8 @@ class FoundationHybrid(nn.Module):
                 dists_score = (s_mean * s_var).mean(dim=(1, 2, 3))
 
             # 2. Patch Cosine
+            mean_cos = None
+            cos_flat = None
             if 'patch_cos' in self.dino_score_terms:
                 fr_norm = F.normalize(fr, p=2, dim=1)
                 fd_norm = F.normalize(fd, p=2, dim=1)
@@ -320,7 +327,17 @@ class FoundationHybrid(nn.Module):
             # To be completely safe and reproducible, let's hardcode for now unless we add variables.
             layer_score = 0.45 * dists_score + 0.45 * patch_cos_score + 0.10 * cls_score
             weighted_layer_scores.append(lw * layer_score)
+            
+            if self.return_cache:
+                dino_cache.append({
+                    'dists_score': dists_score,
+                    'mean_cos': mean_cos if mean_cos is not None else torch.zeros_like(dists_score),
+                    'cos_flat': cos_flat if cos_flat is not None else torch.zeros((ref.shape[0], 1), device=ref.device),
+                    'cls_score': cls_score if 'cls' in self.dino_score_terms else torch.zeros_like(dists_score)
+                })
 
+        if self.return_cache:
+            return dino_cache
         return torch.stack(weighted_layer_scores, dim=0).sum(dim=0) / sum(lws)
 
     @torch.no_grad()
@@ -331,6 +348,7 @@ class FoundationHybrid(nn.Module):
         dists_scores = []
         gram_scores = []
         spatial_variance_list = []
+        cnn_cache = []
 
         keys = self.cnn_layers
         lws = self.cnn_layer_weights
@@ -427,6 +445,17 @@ class FoundationHybrid(nn.Module):
                 l2_dist = torch.mean((gr - gd) ** 2, dim=(1,2))
                 gram_scores.append(lw * torch.exp(-l2_dist))
 
+            if self.return_cache:
+                cnn_cache.append({
+                    'dists_score': dists_scores[-1] / lw if lw > 0 else torch.zeros_like(dists_scores[-1]),
+                    'gram_score': gram_scores[-1] / lw if lw > 0 else torch.zeros_like(gram_scores[-1]),
+                    'std_diff': std_diff,
+                    'mean_diff': mean_diff
+                })
+
+        if self.return_cache:
+            return [], cnn_cache, []
+
         dists_score = torch.stack(dists_scores, dim=0).sum(dim=0)
         gram_score = torch.stack(gram_scores, dim=0).sum(dim=0)
         non_uniformity = torch.stack(spatial_variance_list, dim=0).mean(dim=0)
@@ -435,6 +464,11 @@ class FoundationHybrid(nn.Module):
 
     @torch.no_grad()
     def _single_scale_forward(self, ref, dist, gate_override=None):
+        if self.return_cache:
+            dino_cache = self._compute_dino_score(ref, dist) if 'dino' in self.expert_weights_keys() else []
+            _, cnn_cache, _ = self._compute_cnn_score(ref, dist) if ('gram' in self.expert_weights_keys() or 'dists' in self.expert_weights_keys()) else ([], [], [])
+            return {'dino': dino_cache, 'cnn': cnn_cache}
+
         B = ref.shape[0]
         s_dino = s_dists = s_gram = torch.zeros(B, device=self.device)
         non_uniformity = torch.zeros(B, device=self.device)
@@ -489,6 +523,54 @@ class FoundationHybrid(nn.Module):
     def forward(self, ref, dist, **kwargs):
         # We need to return score natively.
         
+        if self.return_cache:
+            cache_out = {}
+            if self.pyramid_mode:
+                ref_global = F.interpolate(ref, scale_factor=0.5, mode='bicubic')
+                dist_global = F.interpolate(dist, scale_factor=0.5, mode='bicubic')
+                cache_out['global'] = self._single_scale_forward(ref_global, dist_global)
+            else:
+                cache_out['global'] = self._single_scale_forward(ref, dist)
+
+            if not self.multiscale or len(self.views) == 1 and self.views[0] == 'global':
+                return cache_out
+
+            B, C, H, W = ref.shape
+            crop_size = int(min(H, W) * self.crop_ratio)
+
+            if 'center' in self.views:
+                top_c = (H - crop_size) // 2
+                left_c = (W - crop_size) // 2
+                ref_center = ref[:, :, top_c:top_c + crop_size, left_c:left_c + crop_size]
+                dist_center = dist[:, :, top_c:top_c + crop_size, left_c:left_c + crop_size]
+                cache_out['center'] = self._single_scale_forward(ref_center, dist_center)
+
+            if 'texture' in self.views:
+                # In tier1 caching, batch size is usually 1, so we just pick the first crop
+                i = 0
+                if self.crop_selection == 'max_var_ref':
+                    var_map = F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
+                              F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
+                elif self.crop_selection == 'max_var_dist':
+                    var_map = F.avg_pool2d(dist[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
+                              F.avg_pool2d(dist[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
+                elif self.crop_selection == 'max_diff':
+                    var_map = (ref[i:i+1] - dist[i:i+1]).abs().mean(dim=1, keepdim=True)
+                else:
+                    var_map = F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
+                              F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
+
+                var_map = var_map.squeeze()
+                max_idx = torch.argmax(var_map)
+                h_idx, w_idx = max_idx // W, max_idx % W
+                top_t = max(0, min(H - crop_size, int(h_idx) - crop_size // 2))
+                left_t = max(0, min(W - crop_size, int(w_idx) - crop_size // 2))
+                ref_tex = ref[i:i+1, :, top_t:top_t + crop_size, left_t:left_t + crop_size]
+                dist_tex = dist[i:i+1, :, top_t:top_t + crop_size, left_t:left_t + crop_size]
+                cache_out['texture'] = self._single_scale_forward(ref_tex, dist_tex)
+
+            return cache_out
+
         # 1. Global View
         if self.pyramid_mode:
             H, W = ref.shape[2:]
