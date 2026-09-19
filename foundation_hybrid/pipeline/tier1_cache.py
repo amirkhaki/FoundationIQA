@@ -39,8 +39,16 @@ def run_tier1_cache(datasets, output_dir="raw/"):
         for i in tqdm(range(len(dataset))):
             data = dataset[i]
             dist_img = data['img'].unsqueeze(0).to(device)
-            ref_img = data['ref'].unsqueeze(0).to(device)
-            mos = data.get('mos', data.get('dmos', 0))
+            if 'ref_img' in data:
+                ref_img = data['ref_img'].unsqueeze(0).to(device)
+            else:
+                # Fallback if some dataset uses 'ref'
+                ref_img = data['ref'].unsqueeze(0).to(device)
+                
+            mos = data.get('mos_label', data.get('mos', data.get('dmos', 0)))
+            if isinstance(mos, torch.Tensor):
+                mos = mos.item()
+                
             # Some datasets have distortion types
             dist_type = data.get('distortion_type', 'unknown')
             
