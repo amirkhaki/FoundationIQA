@@ -546,27 +546,31 @@ class FoundationHybrid(nn.Module):
                 cache_out['center'] = self._single_scale_forward(ref_center, dist_center)
 
             if 'texture' in self.views:
-                # In tier1 caching, batch size is usually 1, so we just pick the first crop
-                i = 0
-                if self.crop_selection == 'max_var_ref':
-                    var_map = F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
-                              F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
-                elif self.crop_selection == 'max_var_dist':
-                    var_map = F.avg_pool2d(dist[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
-                              F.avg_pool2d(dist[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
-                elif self.crop_selection == 'max_diff':
-                    var_map = (ref[i:i+1] - dist[i:i+1]).abs().mean(dim=1, keepdim=True)
-                else:
-                    var_map = F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
-                              F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
+                ref_tex_list = []
+                dist_tex_list = []
+                for i in range(B):
+                    if self.crop_selection == 'max_var_ref':
+                        var_map = F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
+                                  F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
+                    elif self.crop_selection == 'max_var_dist':
+                        var_map = F.avg_pool2d(dist[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
+                                  F.avg_pool2d(dist[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
+                    elif self.crop_selection == 'max_diff':
+                        var_map = (ref[i:i+1] - dist[i:i+1]).abs().mean(dim=1, keepdim=True)
+                    else:
+                        var_map = F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True) ** 2, self.texture_var_ws, 1, self.texture_var_ws//2) - \
+                                  F.avg_pool2d(ref[i:i+1].mean(dim=1, keepdim=True), self.texture_var_ws, 1, self.texture_var_ws//2) ** 2
 
-                var_map = var_map.squeeze()
-                max_idx = torch.argmax(var_map)
-                h_idx, w_idx = max_idx // W, max_idx % W
-                top_t = max(0, min(H - crop_size, int(h_idx) - crop_size // 2))
-                left_t = max(0, min(W - crop_size, int(w_idx) - crop_size // 2))
-                ref_tex = ref[i:i+1, :, top_t:top_t + crop_size, left_t:left_t + crop_size]
-                dist_tex = dist[i:i+1, :, top_t:top_t + crop_size, left_t:left_t + crop_size]
+                    var_map = var_map.squeeze()
+                    max_idx = torch.argmax(var_map)
+                    h_idx, w_idx = max_idx // W, max_idx % W
+                    top_t = max(0, min(H - crop_size, int(h_idx) - crop_size // 2))
+                    left_t = max(0, min(W - crop_size, int(w_idx) - crop_size // 2))
+                    ref_tex_list.append(ref[i:i+1, :, top_t:top_t + crop_size, left_t:left_t + crop_size])
+                    dist_tex_list.append(dist[i:i+1, :, top_t:top_t + crop_size, left_t:left_t + crop_size])
+
+                ref_tex = torch.cat(ref_tex_list, dim=0)
+                dist_tex = torch.cat(dist_tex_list, dim=0)
                 cache_out['texture'] = self._single_scale_forward(ref_tex, dist_tex)
 
             return cache_out
