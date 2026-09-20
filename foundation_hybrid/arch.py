@@ -16,7 +16,7 @@ class Normalize(nn.Module):
         self.register_buffer('std', torch.tensor(std).view(1, 3, 1, 1))
         
     def forward(self, x):
-        return (x - self.mean) / self.std
+        return (x - self.mean.to(x.device)) / self.std.to(x.device)
 
 class DINOv2SpatialExtractor(nn.Module):
     def __init__(self, model_name="dinov2_vitb14", layer_indices=[0, 3, 6, 9, 11], device=None):
