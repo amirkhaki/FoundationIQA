@@ -25,8 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350          # GitHub-hosted jobs are capped at 6 h
     env:
-      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      # Your Kaggle username (the "me" in me/slug). It is NOT part of the new API token, so it
+      # comes from a repository VARIABLE named KAGGLE_USERNAME (a secret of that name also works).
+      # Deliberately not called KAGGLE_USERNAME here: the CLI reads that name as a credential.
+      KAGGLE_OWNER: ${{ vars.KAGGLE_USERNAME || secrets.KAGGLE_USERNAME }}
       SLUG: foundationiqa-runner   # must equal the kernel title, Kaggle derives the slug from it
       # Things to attach to the kernel, as JSON lists of "owner/slug". Set them as repository
       # VARIABLES (Settings -> Secrets and variables -> Actions -> Variables) or edit the defaults here.
@@ -44,7 +46,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install kaggle
+      - run: pip install "kaggle>=1.8.2"   # first version I found confirmed working with KAGGLE_API_TOKEN
+
+      - name: Check credentials are configured
+        env:
+          HAVE_TOKEN: ${{ secrets.KAGGLE_API_TOKEN != '' }}
+        run: |
+          [ "$HAVE_TOKEN" = "true" ] || { echo "::error::repository secret KAGGLE_API_TOKEN is not set (kaggle.com/settings/api -> Generate New Token)"; exit 1; }
+          [ -n "$KAGGLE_OWNER" ] || { echo "::error::set the repository variable KAGGLE_USERNAME to your Kaggle username"; exit 1; }
 
       - name: Build kernel bundle
         run: |
@@ -62,7 +71,7 @@ jobs:
           pathlib.Path("kaggle_push/script.py").write_text(
               "RUN_CONFIG = " + pprint.pformat(cfg) + "\n\n" + src)   # pformat, not json: needs to be valid Python (True/False)
           meta = {
-              "id": os.environ["KAGGLE_USERNAME"] + "/" + os.environ["SLUG"],
+              "id": os.environ["KAGGLE_OWNER"] + "/" + os.environ["SLUG"],
               "title": os.environ["SLUG"],
               "code_file": "script.py",
               "language": "python",
@@ -79,28 +88,47 @@ jobs:
           PY
 
       - name: Refuse to start while a previous run is still active
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
-          st=$(kaggle kernels status "$KAGGLE_USERNAME/$SLUG" 2>&1 || true)
+          st=$(kaggle kernels status "$KAGGLE_OWNER/$SLUG" 2>&1 || true)
           echo "$st"
-          if grep -qE 'KernelWorkerStatus\.(RUNNING|QUEUED)' <<<"$st"; then
+          # tolerant of both `"KernelWorkerStatus.RUNNING"` and a bare `"running"`
+          state=$(sed -nE 's/.*has status "?([A-Za-z_.]+)"?.*/\1/p' <<<"$st" | head -1 | sed 's/.*\.//' | tr a-z A-Z || true)
+          if [ "$state" = RUNNING ] || [ "$state" = QUEUED ]; then
             echo "::error::previous Kaggle run is still active"
             exit 1
           fi
 
       - name: Push kernel (this starts the run)
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: kaggle kernels push -p kaggle_push
 
       - name: Wait for the Kaggle run and download its output
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
-          ID="$KAGGLE_USERNAME/$SLUG"
+          ID="$KAGGLE_OWNER/$SLUG"
           mkdir -p out
           seen_active=0
+          unknown=0
           SECONDS=0
           sleep 45
           while :; do
             st=$(kaggle kernels status "$ID" 2>&1 || true)
             echo "[$(date -u +%H:%M:%S)] $st"
-            state=$(grep -oE 'KernelWorkerStatus\.[A-Z_]+' <<<"$st" | head -1 | sed 's/.*\.//' || true)
+            state=$(sed -nE 's/.*has status "?([A-Za-z_.]+)"?.*/\1/p' <<<"$st" | head -1 | sed 's/.*\.//' | tr a-z A-Z || true)
+            # Bad token / unexpected CLI output would otherwise loop until the job timeout.
+            if [ -z "$state" ]; then
+              unknown=$((unknown + 1))
+              if [ "$unknown" -ge 10 ]; then
+                echo "::error::cannot read a run status from the Kaggle CLI (auth problem or unexpected output?). Last output: $st"
+                exit 1
+              fi
+            else
+              unknown=0
+            fi
             case "$state" in
               RUNNING|QUEUED)
                 seen_active=1
