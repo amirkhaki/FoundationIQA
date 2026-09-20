@@ -1,0 +1,150 @@
+name: kaggle-run
+
+# Manual trigger on purpose: runs are long and Kaggle GPU quota is limited.
+# Pick any branch in the "Run workflow" dialog; the commit that gets executed on
+# Kaggle is that branch's head, and it is recorded in run_meta.json + the artifact name.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Shell command to run on Kaggle (cwd=/kaggle/working, repo already cloned + pip installed). Anything left in /kaggle/working becomes the artifact."
+        required: true
+        default: "python -m foundation_hybrid.run_ablations --no-regression --datasets TID2013 --out-dir /tmp/raw"
+
+# One Kaggle session at a time: a second push while one is running would just
+# start a parallel session and burn quota.
+concurrency:
+  group: kaggle-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350          # GitHub-hosted jobs are capped at 6 h
+    env:
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      SLUG: foundationiqa-runner   # must equal the kernel title, Kaggle derives the slug from it
+      # Things to attach to the kernel, as JSON lists of "owner/slug". Set them as repository
+      # VARIABLES (Settings -> Secrets and variables -> Actions -> Variables) or edit the defaults here.
+      #   KAGGLE_KERNEL_SOURCES  : notebooks whose OUTPUT you want as input, e.g. the one made by
+      #                            ci/kaggle_prepare_datasets.py  ->  ["you/iqa-datasets"]
+      #   KAGGLE_DATASET_SOURCES : ordinary Kaggle Datasets
+      DATASET_SOURCES: ${{ vars.KAGGLE_DATASET_SOURCES || '[]' }}
+      KERNEL_SOURCES: ${{ vars.KAGGLE_KERNEL_SOURCES || '[]' }}
+      # workflow inputs go through env vars, never straight into shell code
+      IN_COMMAND: ${{ inputs.command }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install kaggle
+
+      - name: Build kernel bundle
+        run: |
+          mkdir -p kaggle_push
+          python - <<'PY'
+          import json, os, pathlib, pprint
+          cfg = {
+              "repo": os.environ["GITHUB_REPOSITORY"],
+              "sha": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF_NAME"],
+              "github_run_id": os.environ["GITHUB_RUN_ID"],
+              "command": os.environ["IN_COMMAND"],
+          }
+          src = pathlib.Path("ci/kaggle_runner.py").read_text()
+          pathlib.Path("kaggle_push/script.py").write_text(
+              "RUN_CONFIG = " + pprint.pformat(cfg) + "\n\n" + src)   # pformat, not json: needs to be valid Python (True/False)
+          meta = {
+              "id": os.environ["KAGGLE_USERNAME"] + "/" + os.environ["SLUG"],
+              "title": os.environ["SLUG"],
+              "code_file": "script.py",
+              "language": "python",
+              "kernel_type": "script",
+              "is_private": "true",
+              "enable_gpu": "true",
+              "enable_internet": "true",
+              "dataset_sources": json.loads(os.environ["DATASET_SOURCES"]),
+              "competition_sources": [],
+              "kernel_sources": json.loads(os.environ["KERNEL_SOURCES"]),
+              "model_sources": [],
+          }
+          pathlib.Path("kaggle_push/kernel-metadata.json").write_text(json.dumps(meta, indent=2))
+          PY
+
+      - name: Refuse to start while a previous run is still active
+        run: |
+          st=$(kaggle kernels status "$KAGGLE_USERNAME/$SLUG" 2>&1 || true)
+          echo "$st"
+          if grep -qE 'KernelWorkerStatus\.(RUNNING|QUEUED)' <<<"$st"; then
+            echo "::error::previous Kaggle run is still active"
+            exit 1
+          fi
+
+      - name: Push kernel (this starts the run)
+        run: kaggle kernels push -p kaggle_push
+
+      - name: Wait for the Kaggle run and download its output
+        run: |
+          ID="$KAGGLE_USERNAME/$SLUG"
+          mkdir -p out
+          seen_active=0
+          SECONDS=0
+          sleep 45
+          while :; do
+            st=$(kaggle kernels status "$ID" 2>&1 || true)
+            echo "[$(date -u +%H:%M:%S)] $st"
+            state=$(grep -oE 'KernelWorkerStatus\.[A-Z_]+' <<<"$st" | head -1 | sed 's/.*\.//' || true)
+            case "$state" in
+              RUNNING|QUEUED)
+                seen_active=1
+                ;;
+              COMPLETE|ERROR|CANCEL_REQUESTED|CANCEL_ACKNOWLEDGED)
+                rm -rf out && mkdir out
+                kaggle kernels output "$ID" -p out || true
+                # Right after a push, status can still describe the PREVIOUS run.
+                # run_meta.json carries our GITHUB_RUN_ID, so it tells us whose output this is.
+                if [ "$(jq -r .github_run_id out/run_meta.json 2>/dev/null)" = "$GITHUB_RUN_ID" ]; then
+                  if [ "$state" = "COMPLETE" ]; then exit 0; fi
+                  echo "::error::Kaggle run ended with $state"
+                  exit 1
+                fi
+                if [ "$seen_active" = 1 ] || [ "$SECONDS" -gt 900 ]; then
+                  echo "::error::Kaggle run ended ($state) without a matching run_meta.json - check the log in the artifact"
+                  exit 1
+                fi
+                echo "status looks stale (previous run), waiting"
+                ;;
+            esac
+            sleep 60
+          done
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Kaggle run"
+            echo "- commit: \`$GITHUB_SHA\` (\`$GITHUB_REF_NAME\`)"
+            echo "- command: \`$IN_COMMAND\`"
+            if [ -f out/run_meta.json ]; then
+              echo '```json'; cat out/run_meta.json; echo; echo '```'
+            fi
+            if [ -f out/master_results.csv ]; then
+              echo "#### master_results.csv"
+              echo '```'; cat out/master_results.csv; echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # if: always() so the log and run_meta.json are kept even when the run failed
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kaggle-results-${{ github.sha }}-${{ github.run_id }}
+          path: out/
+          if-no-files-found: warn

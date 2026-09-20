@@ -97,8 +97,11 @@ def main():
     parser = argparse.ArgumentParser(description="FoundationHybrid Ablation Suite")
     parser.add_argument("--group", type=str, default="all", help="Ablation group (A, B, C, D, E, F, G, H, I, all)")
     parser.add_argument("--priority", type=str, default="P0", help="Priority (P0, P1, P2)")
-    parser.add_argument("--datasets", type=str, nargs="+", default=["LIVE", "CSIQ", "TID2013", "KADID-10k", "PIPAL"])
+    parser.add_argument("--datasets", type=str, nargs="+", default=["LIVE", "CSIQ", "TID2013", "KADID10k", "PIPAL"])
     parser.add_argument("--out-dir", type=str, default="raw")
+    parser.add_argument("--data-root", type=str, default=None,
+                        help="Where pyiqa finds/downloads the IQA datasets "
+                             "(default: $IQA_DATA_ROOT, else ./datasets)")
     parser.add_argument("--no-regression", action="store_true", help="Skip regression check")
     parser.add_argument("--skip-cache", action="store_true", help="Skip Tier-1 caching if already done")
     
@@ -113,7 +116,7 @@ def main():
             
     logger.info("=== Running Tier-1 Caching ===")
     if not args.skip_cache:
-        run_tier1_cache(args.datasets, output_dir=args.out_dir)
+        run_tier1_cache(args.datasets, output_dir=args.out_dir, data_root=args.data_root)
         
     logger.info("=== Running Tier-2 Evaluations ===")
     run_tier2_evaluations(cache_dir=args.out_dir)

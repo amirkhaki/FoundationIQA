@@ -9,13 +9,19 @@ from pyiqa.default_model_configs import DEFAULT_CONFIGS
 # Import to register the architecture
 import foundation_hybrid.arch
 
-def run_tier1_cache(datasets, output_dir="raw/"):
+def run_tier1_cache(datasets, output_dir="raw/", data_root=None):
     """
     Tier-1 Caching Script.
     Runs the model with `return_cache=True` and saves raw outputs (DISTS/Gram/Cosine scores)
     for every image pair so we can perform fast post-hoc ablation studies.
+
+    data_root: where pyiqa looks for (and, if missing, downloads) the datasets.
+    Falls back to $IQA_DATA_ROOT, then pyiqa's own default "./datasets" (relative to
+    the current directory). Point it at a pre-populated, read-only location to avoid
+    re-downloading the datasets on every run.
     """
     os.makedirs(output_dir, exist_ok=True)
+    data_root = data_root or os.environ.get("IQA_DATA_ROOT") or "./datasets"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Inject plugin to PyIQA
@@ -32,7 +38,7 @@ def run_tier1_cache(datasets, output_dir="raw/"):
     
     for dataset_name in datasets:
         print(f"Caching dataset: {dataset_name}")
-        dataset = pyiqa.load_dataset(dataset_name)
+        dataset = pyiqa.load_dataset(dataset_name, data_root=data_root)
         
         # LIVE has variable image sizes, so it needs batch_size=1 unless custom collate is used.
         bs = 1 if dataset_name.lower() == 'live' else 8
