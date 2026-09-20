@@ -53,6 +53,32 @@ def version(pkg):
         return None
 
 
+def find_iqa_data_root(base=pathlib.Path("/kaggle/input"), max_depth=5):
+    """Find the pre-extracted pyiqa dataset tree among the attached inputs, wherever Kaggle
+    mounted it (the mount layout differs between dataset / notebook-output sources, so
+    guessing the path is fragile). Markers: PREPARED_WITH.txt (written by
+    ci/kaggle_prepare_datasets.py), or pyiqa's own meta_info/ folder. Returns a list,
+    marker-file matches first. Bounded depth: never descends into the image folders."""
+    found = []
+
+    def visit(d, depth):
+        if (d / "PREPARED_WITH.txt").is_file() or (d / "meta_info").is_dir():
+            found.append(d)
+            return  # don't look inside a data root
+        if depth >= max_depth:
+            return
+        try:
+            children = sorted(c for c in d.iterdir() if c.is_dir())
+        except OSError:
+            return
+        for c in children:
+            visit(c, depth + 1)
+
+    if base.exists():
+        visit(base, 0)
+    return sorted(found, key=lambda d: not (d / "PREPARED_WITH.txt").is_file())
+
+
 write_meta()  # written first, so even an early failure leaves a matching meta behind
 t0 = time.time()
 try:
@@ -67,10 +93,24 @@ try:
 
     # --- 2. inputs ---------------------------------------------------------------
     # Datasets / kernels attached via dataset_sources / kernel_sources appear read-only
-    # under /kaggle/input/<slug>. Listing them makes the exact --data-root path visible.
+    # under /kaggle/input. Where exactly depends on the source type, so we search for the
+    # pyiqa dataset tree instead of assuming a path, and hand it to the command as
+    # IQA_DATA_ROOT (see step 4).
     inputs = pathlib.Path("/kaggle/input")
     meta["inputs"] = sorted(p.name for p in inputs.iterdir()) if inputs.exists() else []
     print("attached inputs:", meta["inputs"], flush=True)
+    roots = find_iqa_data_root()
+    data_root = roots[0] if roots else None
+    meta["iqa_data_root"] = str(data_root) if data_root else None
+    if data_root:
+        print(f"IQA data root: {data_root}", flush=True)
+        if len(roots) > 1:
+            print(f"WARNING: several candidates {[str(r) for r in roots]}; using the first", flush=True)
+    else:
+        print("WARNING: no pre-extracted IQA dataset tree found under /kaggle/input "
+              "(looked for PREPARED_WITH.txt / meta_info/). pyiqa will DOWNLOAD the datasets. "
+              "Input layout (dirs, depth<=4):", flush=True)
+        subprocess.run("find /kaggle/input -maxdepth 4 -type d 2>/dev/null | head -60", shell=True)
 
     # --- 3. install + record the environment ---------------------------------
     sh([sys.executable, "-m", "pip", "install", "-q", "-e", str(SRC)])
@@ -92,9 +132,12 @@ try:
     # failing command and don't let `cmd | tee` hide a failure.
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
-    # If the command doesn't say where the IQA datasets live (--data-root beats this),
-    # keep any download OUT of /kaggle/working so it can't ship back as output.
-    env.setdefault("IQA_DATA_ROOT", "/tmp/iqa_datasets")
+    # Where pyiqa should look for the datasets. Precedence: an explicit --data-root in the
+    # command > IQA_DATA_ROOT already set in the environment > the tree found in step 2 >
+    # /tmp/iqa_datasets (a download target that can't ship back as output).
+    if "IQA_DATA_ROOT" not in env:
+        env["IQA_DATA_ROOT"] = str(data_root) if data_root else "/tmp/iqa_datasets"
+    print("IQA_DATA_ROOT for the command:", env["IQA_DATA_ROOT"], flush=True)
     print("$", cfg["command"], flush=True)
     subprocess.run(
         ["bash", "-eo", "pipefail", "-c", cfg["command"]],
