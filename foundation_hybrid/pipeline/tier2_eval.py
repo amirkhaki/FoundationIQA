@@ -64,7 +64,7 @@ def compute_from_cache(cache, config):
         
     return scores
 
-def run_tier2_evaluations(cache_dir="raw/"):
+def run_tier2_evaluations(cache_dir="raw/", out_csv=None, num_samples=None, seed=None):
     results = []
     configs = [
         # Group A: Components
@@ -115,8 +115,19 @@ def run_tier2_evaluations(cache_dir="raw/"):
             })
             
     df = pd.DataFrame(results)
-    df.to_csv("master_results.csv", index=False)
-    print("Tier-2 evaluations complete. Saved to master_results.csv")
+    
+    if out_csv is not None:
+        out_file = out_csv
+    else:
+        if num_samples is not None:
+            datasets_processed = list(df['dataset'].unique())
+            prefix = datasets_processed[0] if len(datasets_processed) == 1 else "combined"
+            out_file = f"{prefix}_{num_samples}_seed_{seed}.csv"
+        else:
+            out_file = "master_results.csv"
+            
+    df.to_csv(out_file, index=False)
+    print(f"Tier-2 evaluations complete. Saved to {out_file}")
     print(df.to_string())
 
 if __name__ == "__main__":

@@ -107,6 +107,7 @@ def main():
     parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to evaluate (random subset)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling")
     parser.add_argument("--quiet", action="store_true", help="Disable progress bars")
+    parser.add_argument("--out-csv", type=str, default=None, help="Output CSV file path")
     
     args = parser.parse_args()
     args.datasets = [d.lower() for d in args.datasets]
@@ -123,7 +124,7 @@ def main():
                         num_samples=args.num_samples, seed=args.seed, quiet=args.quiet)
         
     logger.info("=== Running Tier-2 Evaluations ===")
-    run_tier2_evaluations(cache_dir=args.out_dir)
+    run_tier2_evaluations(cache_dir=args.out_dir, out_csv=args.out_csv, num_samples=args.num_samples, seed=args.seed)
     
     logger.info("=== Generating Visualizations ===")
     # generate_all_visualizations()
