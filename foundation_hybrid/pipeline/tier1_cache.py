@@ -55,7 +55,7 @@ def run_tier1_cache(datasets, output_dir="raw/"):
             mos_batch = data.get('mos_label', data.get('mos', data.get('dmos', torch.zeros(dist_img.shape[0]))))
             dist_type_batch = data.get('distortion_type', ['unknown'] * dist_img.shape[0])
             
-            with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.float16):
+            with torch.no_grad():
                 cache = model(ref_img, dist_img)
                 
             B = dist_img.shape[0]
