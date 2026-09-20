@@ -96,6 +96,7 @@ def run_tier2_evaluations(cache_dir="raw/"):
     df = pd.DataFrame(results)
     df.to_csv("master_results.csv", index=False)
     print("Tier-2 evaluations complete. Saved to master_results.csv")
+    print(df.to_string())
 
 if __name__ == "__main__":
     # DO NOT EXECUTE - THIS IS JUST THE CODE

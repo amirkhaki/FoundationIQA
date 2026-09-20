@@ -85,7 +85,7 @@ class FoundationHybrid(nn.Module):
                  dino_layer_indices=None,
                  dino_dists_local=False,
                  dino_dists_ws=3,
-                 dino_norm_imagenet=False,
+                 dino_norm_imagenet=True,
                  dino_padding_mode='reflect',
                  dino_resize=None,
                  # CNN Ablations
@@ -201,9 +201,9 @@ class FoundationHybrid(nn.Module):
             wt = None
             
         if wt is not None:
-            self.input_transform = wt.transforms()
+            self.cnn_transform = wt.transforms()
         else:
-            self.input_transform = None
+            self.cnn_transform = None
 
         if 'dino' in self.expert_weights_keys():
             self.dino = DINOv2SpatialExtractor(dino_model_name, self.dino_layer_indices, device=self.device)
@@ -478,9 +478,12 @@ class FoundationHybrid(nn.Module):
 
     @torch.no_grad()
     def _single_scale_forward(self, ref, dist, gate_override=None):
+        ref_cnn = self.cnn_transform(ref) if getattr(self, 'cnn_transform', None) is not None else ref
+        dist_cnn = self.cnn_transform(dist) if getattr(self, 'cnn_transform', None) is not None else dist
+
         if self.return_cache:
             dino_cache = self._compute_dino_score(ref, dist) if 'dino' in self.expert_weights_keys() else []
-            _, cnn_cache, _ = self._compute_cnn_score(ref, dist) if ('gram' in self.expert_weights_keys() or 'dists' in self.expert_weights_keys()) else ([], [], [])
+            _, cnn_cache, _ = self._compute_cnn_score(ref_cnn, dist_cnn) if ('gram' in self.expert_weights_keys() or 'dists' in self.expert_weights_keys()) else ([], [], [])
             return {'dino': dino_cache, 'cnn': cnn_cache}
 
         B = ref.shape[0]
@@ -490,7 +493,7 @@ class FoundationHybrid(nn.Module):
         if 'dino' in self.expert_weights_keys():
             s_dino = self._compute_dino_score(ref, dist)
         if 'gram' in self.expert_weights_keys() or 'dists' in self.expert_weights_keys():
-            s_dists, s_gram, non_uniformity = self._compute_cnn_score(ref, dist)
+            s_dists, s_gram, non_uniformity = self._compute_cnn_score(ref_cnn, dist_cnn)
 
         if self.expert_weights is not None:
             # Fixed weight ablation A1
@@ -535,10 +538,6 @@ class FoundationHybrid(nn.Module):
 
     @torch.no_grad()
     def forward(self, ref, dist, **kwargs):
-        if getattr(self, 'input_transform', None) is not None:
-            ref = self.input_transform(ref)
-            dist = self.input_transform(dist)
-
         # We need to return score natively.
         
         if self.return_cache:
