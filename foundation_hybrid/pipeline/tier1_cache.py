@@ -9,7 +9,7 @@ from pyiqa.default_model_configs import DEFAULT_CONFIGS
 # Import to register the architecture
 import foundation_hybrid.arch
 
-def run_tier1_cache(datasets, output_dir="raw/", data_root=None):
+def run_tier1_cache(datasets, output_dir="raw/", data_root=None, num_samples=None, seed=42, quiet=False):
     """
     Tier-1 Caching Script.
     Runs the model with `return_cache=True` and saves raw outputs (DISTS/Gram/Cosine scores)
@@ -40,6 +40,12 @@ def run_tier1_cache(datasets, output_dir="raw/", data_root=None):
         print(f"Caching dataset: {dataset_name}")
         dataset = pyiqa.load_dataset(dataset_name, data_root=data_root)
         
+        if num_samples is not None and num_samples < len(dataset):
+            print(f"Subsampling {num_samples} images from {dataset_name} (seed={seed})")
+            rng = np.random.default_rng(seed)
+            indices = rng.choice(len(dataset), num_samples, replace=False)
+            dataset = torch.utils.data.Subset(dataset, indices)
+        
         # LIVE has variable image sizes, so it needs batch_size=1 unless custom collate is used.
         bs = 1 if dataset_name.lower() == 'live' else 8
         
@@ -51,7 +57,7 @@ def run_tier1_cache(datasets, output_dir="raw/", data_root=None):
         cache_data = []
         idx_counter = 0
         
-        for data in tqdm(dataloader):
+        for data in tqdm(dataloader, disable=quiet):
             dist_img = data['img'].to(device)
             if 'ref_img' in data:
                 ref_img = data['ref_img'].to(device)

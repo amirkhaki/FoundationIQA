@@ -67,13 +67,34 @@ def compute_from_cache(cache, config):
 def run_tier2_evaluations(cache_dir="raw/"):
     results = []
     configs = [
+        # Group A: Components
         {"id": "A1_full", "use_gate": True},
-        {"id": "A1_no_gate", "use_gate": False, "fixed_weights": (1/3, 1/3, 1/3)},
-        {"id": "A1_dino_only", "use_gate": False, "fixed_weights": (1.0, 0.0, 0.0)},
-        {"id": "A1_gram_only", "use_gate": False, "fixed_weights": (0.0, 1.0, 0.0)},
-        {"id": "A1_dists_only", "use_gate": False, "fixed_weights": (0.0, 0.0, 1.0)},
+        {"id": "A2_no_gate", "use_gate": False, "fixed_weights": (1/3, 1/3, 1/3)},
+        {"id": "A3_dino_only", "use_gate": False, "fixed_weights": (1.0, 0.0, 0.0)},
+        {"id": "A4_gram_only", "use_gate": False, "fixed_weights": (0.0, 1.0, 0.0)},
+        {"id": "A5_dists_only", "use_gate": False, "fixed_weights": (0.0, 0.0, 1.0)},
+        {"id": "A6_dino_gram", "use_gate": False, "fixed_weights": (0.5, 0.5, 0.0)},
+        {"id": "A7_dino_dists", "use_gate": False, "fixed_weights": (0.5, 0.0, 0.5)},
+        
+        # Group B: DINO Worst-K Patch Selection
+        {"id": "B1_worst_01", "use_gate": True, "worst_k_ratio": 0.01},
+        {"id": "B1_worst_05", "use_gate": True, "worst_k_ratio": 0.05},
+        {"id": "B1_worst_10_base", "use_gate": True, "worst_k_ratio": 0.10},
+        {"id": "B1_worst_25", "use_gate": True, "worst_k_ratio": 0.25},
+        {"id": "B1_worst_100", "use_gate": True, "worst_k_ratio": 1.00},
+        
+        # Group C: DINO Layers
+        {"id": "C1_last_layer", "use_gate": True, "dino_weights": [0, 0, 0, 0, 1]},
+        {"id": "C2_equal", "use_gate": True, "dino_weights": [0.2, 0.2, 0.2, 0.2, 0.2]},
+        {"id": "C3_early_heavy", "use_gate": True, "dino_weights": [0.4, 0.3, 0.2, 0.1, 0.0]},
+        {"id": "C4_baseline", "use_gate": True, "dino_weights": [0.25, 0.30, 0.25, 0.12, 0.08]},
+        
+        # Group E: Multi-Scale Views
         {"id": "E1_global_only", "use_gate": True, "view_weights": (1.0, 0.0, 0.0)},
-        # ... generate all configs for P0, P1, P2 ...
+        {"id": "E2_center_only", "use_gate": True, "view_weights": (0.0, 1.0, 0.0)},
+        {"id": "E3_texture_only", "use_gate": True, "view_weights": (0.0, 0.0, 1.0)},
+        {"id": "E4_global_center", "use_gate": True, "view_weights": (0.5, 0.5, 0.0)},
+        {"id": "E5_baseline", "use_gate": True, "view_weights": (0.60, 0.25, 0.15)},
     ]
     
     for ds_file in os.listdir(cache_dir):

@@ -202,8 +202,15 @@ class FoundationHybrid(nn.Module):
             
         if wt is not None:
             self.cnn_transform = wt.transforms()
+            # DINO gets the same spatial transforms (Resize, Crop) but keeps its own Color Normalization
+            import torchvision.transforms as T
+            self.spatial_transform = T.Compose([
+                T.Resize(256, interpolation=T.InterpolationMode.BILINEAR, antialias=True),
+                T.CenterCrop(224)
+            ])
         else:
             self.cnn_transform = None
+            self.spatial_transform = None
 
         if 'dino' in self.expert_weights_keys():
             self.dino = DINOv2SpatialExtractor(dino_model_name, self.dino_layer_indices, device=self.device)
@@ -481,8 +488,11 @@ class FoundationHybrid(nn.Module):
         ref_cnn = self.cnn_transform(ref) if getattr(self, 'cnn_transform', None) is not None else ref
         dist_cnn = self.cnn_transform(dist) if getattr(self, 'cnn_transform', None) is not None else dist
 
+        ref_dino = self.spatial_transform(ref) if getattr(self, 'spatial_transform', None) is not None else ref
+        dist_dino = self.spatial_transform(dist) if getattr(self, 'spatial_transform', None) is not None else dist
+
         if self.return_cache:
-            dino_cache = self._compute_dino_score(ref, dist) if 'dino' in self.expert_weights_keys() else []
+            dino_cache = self._compute_dino_score(ref_dino, dist_dino) if 'dino' in self.expert_weights_keys() else []
             _, cnn_cache, _ = self._compute_cnn_score(ref_cnn, dist_cnn) if ('gram' in self.expert_weights_keys() or 'dists' in self.expert_weights_keys()) else ([], [], [])
             return {'dino': dino_cache, 'cnn': cnn_cache}
 
@@ -491,7 +501,7 @@ class FoundationHybrid(nn.Module):
         non_uniformity = torch.zeros(B, device=self.device)
         
         if 'dino' in self.expert_weights_keys():
-            s_dino = self._compute_dino_score(ref, dist)
+            s_dino = self._compute_dino_score(ref_dino, dist_dino)
         if 'gram' in self.expert_weights_keys() or 'dists' in self.expert_weights_keys():
             s_dists, s_gram, non_uniformity = self._compute_cnn_score(ref_cnn, dist_cnn)
 

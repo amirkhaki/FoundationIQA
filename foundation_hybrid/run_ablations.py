@@ -104,6 +104,9 @@ def main():
                              "(default: $IQA_DATA_ROOT, else ./datasets)")
     parser.add_argument("--no-regression", action="store_true", help="Skip regression check")
     parser.add_argument("--skip-cache", action="store_true", help="Skip Tier-1 caching if already done")
+    parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to evaluate (random subset)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling")
+    parser.add_argument("--quiet", action="store_true", help="Disable progress bars")
     
     args = parser.parse_args()
     args.datasets = [d.lower() for d in args.datasets]
@@ -116,7 +119,8 @@ def main():
             
     logger.info("=== Running Tier-1 Caching ===")
     if not args.skip_cache:
-        run_tier1_cache(args.datasets, output_dir=args.out_dir, data_root=args.data_root)
+        run_tier1_cache(args.datasets, output_dir=args.out_dir, data_root=args.data_root, 
+                        num_samples=args.num_samples, seed=args.seed, quiet=args.quiet)
         
     logger.info("=== Running Tier-2 Evaluations ===")
     run_tier2_evaluations(cache_dir=args.out_dir)
