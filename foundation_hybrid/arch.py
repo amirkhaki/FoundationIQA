@@ -191,6 +191,20 @@ class FoundationHybrid(nn.Module):
         self.pyramid_mode = pyramid_mode
 
         # Initialization
+        if 'alexnet' in cnn_backbone:
+            wt = models.AlexNet_Weights.IMAGENET1K_V1
+        elif 'vgg16' in cnn_backbone:
+            wt = models.VGG16_Weights.IMAGENET1K_V1
+        elif 'resnet50' in cnn_backbone:
+            wt = models.ResNet50_Weights.IMAGENET1K_V1
+        else:
+            wt = None
+            
+        if wt is not None:
+            self.input_transform = wt.transforms()
+        else:
+            self.input_transform = None
+
         if 'dino' in self.expert_weights_keys():
             self.dino = DINOv2SpatialExtractor(dino_model_name, self.dino_layer_indices, device=self.device)
             
@@ -216,7 +230,7 @@ class FoundationHybrid(nn.Module):
         ext = create_feature_extractor(base, return_nodes=return_nodes).to(self.device).eval()
         for p in ext.parameters():
             p.requires_grad = False
-        norm = Normalize().to(self.device)
+        norm = nn.Identity().to(self.device)
         return ext, norm
 
     @staticmethod
@@ -521,6 +535,10 @@ class FoundationHybrid(nn.Module):
 
     @torch.no_grad()
     def forward(self, ref, dist, **kwargs):
+        if getattr(self, 'input_transform', None) is not None:
+            ref = self.input_transform(ref)
+            dist = self.input_transform(dist)
+
         # We need to return score natively.
         
         if self.return_cache:
