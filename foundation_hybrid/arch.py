@@ -118,6 +118,7 @@ class FoundationHybrid(nn.Module):
                  texture_var_ws=7,
                  pyramid_mode=False,
                  return_cache=False,
+                 spatial_early=True,
                  **kwargs
                  ):
         super().__init__()
@@ -130,6 +131,7 @@ class FoundationHybrid(nn.Module):
         self.xi = xi
         self.multiscale = multiscale
         self.return_cache = return_cache
+        self.spatial_early = spatial_early
         
         self.dino_score_terms = dino_score_terms
         self.dino_patch_cos_mode = dino_patch_cos_mode
@@ -201,9 +203,13 @@ class FoundationHybrid(nn.Module):
             wt = None
             
         if wt is not None:
-            self.cnn_transform = wt.transforms()
-            # DINO gets the same spatial transforms (Resize, Crop) but keeps its own Color Normalization
             import torchvision.transforms as T
+            if getattr(self, 'spatial_early', True):
+                self.cnn_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            else:
+                self.cnn_transform = wt.transforms()
+                
+            # DINO gets the same spatial transforms (Resize, Crop) but keeps its own Color Normalization
             self.spatial_transform = T.Compose([
                 T.Resize(256, interpolation=T.InterpolationMode.BILINEAR, antialias=True),
                 T.CenterCrop(224)
@@ -488,8 +494,12 @@ class FoundationHybrid(nn.Module):
         ref_cnn = self.cnn_transform(ref) if getattr(self, 'cnn_transform', None) is not None else ref
         dist_cnn = self.cnn_transform(dist) if getattr(self, 'cnn_transform', None) is not None else dist
 
-        ref_dino = self.spatial_transform(ref) if getattr(self, 'spatial_transform', None) is not None else ref
-        dist_dino = self.spatial_transform(dist) if getattr(self, 'spatial_transform', None) is not None else dist
+        if not getattr(self, 'spatial_early', True) and getattr(self, 'spatial_transform', None) is not None:
+            ref_dino = self.spatial_transform(ref)
+            dist_dino = self.spatial_transform(dist)
+        else:
+            ref_dino = ref
+            dist_dino = dist
 
         if self.return_cache:
             dino_cache = self._compute_dino_score(ref_dino, dist_dino) if 'dino' in self.expert_weights_keys() else []
@@ -550,6 +560,10 @@ class FoundationHybrid(nn.Module):
     def forward(self, ref, dist, **kwargs):
         # We need to return score natively.
         
+        if getattr(self, 'spatial_early', True) and getattr(self, 'spatial_transform', None) is not None:
+            ref = self.spatial_transform(ref)
+            dist = self.spatial_transform(dist)
+            
         if self.return_cache:
             cache_out = {}
             if self.pyramid_mode:
