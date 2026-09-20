@@ -27,7 +27,9 @@ def compute_from_cache(cache, config):
             # Recompute DINO
             dino_layer_scores = []
             for i, ldino in enumerate(view_cache['dino']):
-                patch_cos = 0.5 * ldino['mean_cos'] + 0.5 * np.percentile(ldino['cos_flat'], config.get('worst_k_ratio', 0.10) * 100, axis=-1)
+                k_val = max(1, int(len(ldino['cos_flat']) * config.get('worst_k_ratio', 0.10)))
+                worst_cos = np.mean(np.sort(ldino['cos_flat'])[:k_val])
+                patch_cos = 0.5 * ldino['mean_cos'] + 0.5 * worst_cos
                 ls = 0.45 * ldino['dists_score'] + 0.45 * patch_cos + 0.10 * ldino['cls_score']
                 dino_layer_scores.append(ls * config.get('dino_weights', [0.25, 0.30, 0.25, 0.12, 0.08])[i])
             s_dino = np.sum(dino_layer_scores) / np.sum(config.get('dino_weights', [0.25, 0.30, 0.25, 0.12, 0.08]))
