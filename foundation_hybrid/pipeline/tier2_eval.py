@@ -46,7 +46,9 @@ def compute_from_cache(cache, config):
             
             # Gating
             if config.get('use_gate', True):
-                gate_dino = 1 / (1 + np.exp(-4.0 * (nu - 0.70)))
+                steepness = config.get('gate_steepness', 4.0)
+                threshold = config.get('gate_threshold', 0.70)
+                gate_dino = 1 / (1 + np.exp(-steepness * (nu - threshold)))
                 w_d = 0.35 + 0.30 * gate_dino
                 w_g = 0.50 - 0.30 * gate_dino
                 w_p = 0.15
@@ -77,6 +79,8 @@ def run_tier2_evaluations(cache_dir="raw/", out_csv=None, num_samples=None, seed
         {"id": "A7_dino_dists", "use_gate": False, "fixed_weights": (0.5, 0.0, 0.5)},
         
         # Group B: DINO Worst-K Patch Selection
+        {"id": "B1_worst_002", "use_gate": True, "worst_k_ratio": 0.002},
+        {"id": "B1_worst_005", "use_gate": True, "worst_k_ratio": 0.005},
         {"id": "B1_worst_01", "use_gate": True, "worst_k_ratio": 0.01},
         {"id": "B1_worst_05", "use_gate": True, "worst_k_ratio": 0.05},
         {"id": "B1_worst_10_base", "use_gate": True, "worst_k_ratio": 0.10},
@@ -88,6 +92,15 @@ def run_tier2_evaluations(cache_dir="raw/", out_csv=None, num_samples=None, seed
         {"id": "C2_equal", "use_gate": True, "dino_weights": [0.2, 0.2, 0.2, 0.2, 0.2]},
         {"id": "C3_early_heavy", "use_gate": True, "dino_weights": [0.4, 0.3, 0.2, 0.1, 0.0]},
         {"id": "C4_baseline", "use_gate": True, "dino_weights": [0.25, 0.30, 0.25, 0.12, 0.08]},
+        {"id": "C5_blend_1", "use_gate": True, "dino_weights": [0.3, 0.3, 0.2, 0.1, 0.1]},
+        {"id": "C6_first_two", "use_gate": True, "dino_weights": [0.5, 0.5, 0.0, 0.0, 0.0]},
+        
+        # Group D: Gate Hyperparameters
+        {"id": "D1_gate_thresh_04", "use_gate": True, "gate_threshold": 0.40},
+        {"id": "D2_gate_thresh_05", "use_gate": True, "gate_threshold": 0.50},
+        {"id": "D3_gate_thresh_06", "use_gate": True, "gate_threshold": 0.60},
+        {"id": "D4_gate_steep_2", "use_gate": True, "gate_steepness": 2.0},
+        {"id": "D5_gate_steep_8", "use_gate": True, "gate_steepness": 8.0},
         
         # Group E: Multi-Scale Views
         {"id": "E1_global_only", "use_gate": True, "view_weights": (1.0, 0.0, 0.0)},
@@ -95,12 +108,26 @@ def run_tier2_evaluations(cache_dir="raw/", out_csv=None, num_samples=None, seed
         {"id": "E3_texture_only", "use_gate": True, "view_weights": (0.0, 0.0, 1.0)},
         {"id": "E4_global_center", "use_gate": True, "view_weights": (0.5, 0.5, 0.0)},
         {"id": "E5_baseline", "use_gate": True, "view_weights": (0.60, 0.25, 0.15)},
+
+        # Group J: Joint Optimizations
+        {"id": "J1_joint_best", "use_gate": True, "worst_k_ratio": 0.01, "view_weights": (0.5, 0.5, 0.0), "dino_weights": [0.4, 0.3, 0.2, 0.1, 0.0]},
+        {"id": "J2_joint_equal_dino", "use_gate": True, "worst_k_ratio": 0.01, "view_weights": (0.5, 0.5, 0.0), "dino_weights": [0.2, 0.2, 0.2, 0.2, 0.2]}
     ]
+    
+    diagnostics = {}
     
     for ds_file in os.listdir(cache_dir):
         if not ds_file.endswith("_cache.npy"): continue
         dataset_name = ds_file.replace("_cache.npy", "")
         cache = np.load(os.path.join(cache_dir, ds_file), allow_pickle=True)
+        
+        # Diagnostics
+        nu_list = []
+        for item in cache:
+            view_cache = item['cache'].get('global', next(iter(item['cache'].values())))
+            nus = [lcnn['std_diff'] / lcnn['mean_diff'] for lcnn in view_cache['cnn']]
+            nu_list.append(np.mean(nus))
+        diagnostics[dataset_name] = nu_list
         
         for cfg in configs:
             scores = compute_from_cache(cache, cfg)
@@ -127,7 +154,22 @@ def run_tier2_evaluations(cache_dir="raw/", out_csv=None, num_samples=None, seed
             out_file = "master_results.csv"
             
     df.to_csv(out_file, index=False)
-    print(f"Tier-2 evaluations complete. Saved to {out_file}")
+    
+    diag_file = out_file.replace(".csv", "_diagnostics.txt")
+    with open(diag_file, "w") as f:
+        f.write("Gate Diagnostics (nu distribution):\n")
+        for ds, nus in diagnostics.items():
+            arr = np.array(nus)
+            if len(arr) == 0: continue
+            f.write(f"\n{ds}:\n")
+            f.write(f"  Count: {len(arr)}\n")
+            f.write(f"  Min: {np.min(arr):.4f}, Max: {np.max(arr):.4f}, Mean: {np.mean(arr):.4f}\n")
+            f.write(f"  % above 0.70 threshold: {np.mean(arr > 0.70) * 100:.2f}%\n")
+            f.write(f"  % above 0.60 threshold: {np.mean(arr > 0.60) * 100:.2f}%\n")
+            f.write(f"  % above 0.50 threshold: {np.mean(arr > 0.50) * 100:.2f}%\n")
+            f.write(f"  % above 0.40 threshold: {np.mean(arr > 0.40) * 100:.2f}%\n")
+            
+    print(f"Tier-2 evaluations complete. Saved to {out_file} and {diag_file}")
     print(df.to_string())
 
 if __name__ == "__main__":
