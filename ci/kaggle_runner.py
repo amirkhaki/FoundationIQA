@@ -79,6 +79,49 @@ def find_iqa_data_root(base=pathlib.Path("/kaggle/input"), max_depth=5):
     return sorted(found, key=lambda d: not (d / "PREPARED_WITH.txt").is_file())
 
 
+def scratch_dir():
+    """Big, writable, NOT part of the kernel output."""
+    for c in ("/kaggle/temp", "/tmp"):
+        if os.path.isdir(c) and os.access(c, os.W_OK):
+            return pathlib.Path(c)
+    return pathlib.Path("/tmp")
+
+
+def count_files(path):
+    return sum(len(names) for _, _, names in os.walk(path))
+
+
+def extract_iqa_tars(src, dest, command):
+    """The prepared inputs hold one .tar per dataset (Kaggle caps notebook output at ~500 files, so an
+    extracted tree cannot be stored). Extract what the command needs into `dest` (local disk) and verify
+    the file counts against MANIFEST.json. A dataset counts as needed if its name appears in the command
+    (case-insensitive); if the command names none of them (e.g. the default dataset list), extract all.
+    meta_info is always extracted. Returns the list of extracted names."""
+    tars = sorted(src.glob("*.tar"))
+    manifest_file = src / "MANIFEST.json"
+    manifest = json.loads(manifest_file.read_text()) if manifest_file.is_file() else {}
+    cmd = command.lower()
+    wanted = [t for t in tars if t.stem != "meta_info" and t.stem.lower() in cmd] or \
+             [t for t in tars if t.stem != "meta_info"]
+    wanted += [t for t in tars if t.stem == "meta_info"]
+    dest.mkdir(parents=True, exist_ok=True)
+    done = []
+    for t in wanted:
+        if (dest / t.stem).exists():
+            print(f"already extracted: {t.stem}", flush=True)
+            continue
+        t1 = time.time()
+        sh(["tar", "-xf", str(t), "-C", str(dest)])
+        got = count_files(dest / t.stem)
+        want = manifest.get(t.stem, {}).get("files")
+        print(f"extracted {t.stem}: {got} files in {time.time() - t1:.0f}s (manifest: {want})", flush=True)
+        if want is not None and got != want:
+            raise RuntimeError(f"{t.stem}: extracted {got} files but the manifest says {want} - "
+                               "the prepared datasets are damaged, re-run the prep notebook")
+        done.append(t.stem)
+    return done
+
+
 write_meta()  # written first, so even an early failure leaves a matching meta behind
 t0 = time.time()
 try:
@@ -101,16 +144,22 @@ try:
     print("attached inputs:", meta["inputs"], flush=True)
     roots = find_iqa_data_root()
     data_root = roots[0] if roots else None
-    meta["iqa_data_root"] = str(data_root) if data_root else None
     if data_root:
-        print(f"IQA data root: {data_root}", flush=True)
+        print(f"IQA data source: {data_root}", flush=True)
         if len(roots) > 1:
             print(f"WARNING: several candidates {[str(r) for r in roots]}; using the first", flush=True)
+        if any(data_root.glob("*.tar")):  # tar layout (see ci/kaggle_prepare_datasets.py)
+            t1 = time.time()
+            meta["iqa_extracted"] = extract_iqa_tars(data_root, scratch_dir() / "iqa_datasets", cfg["command"])
+            meta["iqa_extract_seconds"] = round(time.time() - t1, 1)
+            data_root = scratch_dir() / "iqa_datasets"
+        print(f"IQA data root: {data_root}", flush=True)
     else:
-        print("WARNING: no pre-extracted IQA dataset tree found under /kaggle/input "
+        print("WARNING: no prepared IQA datasets found under /kaggle/input "
               "(looked for PREPARED_WITH.txt / meta_info/). pyiqa will DOWNLOAD the datasets. "
               "Input layout (dirs, depth<=4):", flush=True)
         subprocess.run("find /kaggle/input -maxdepth 4 -type d 2>/dev/null | head -60", shell=True)
+    meta["iqa_data_root"] = str(data_root) if data_root else None
 
     # --- 3. install + record the environment ---------------------------------
     sh([sys.executable, "-m", "pip", "install", "-q", "-e", str(SRC)])
@@ -134,9 +183,9 @@ try:
     env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
     # Where pyiqa should look for the datasets. Precedence: an explicit --data-root in the
     # command > IQA_DATA_ROOT already set in the environment > the tree found in step 2 >
-    # /tmp/iqa_datasets (a download target that can't ship back as output).
+    # scratch/iqa_datasets (a download target that can't ship back as output).
     if "IQA_DATA_ROOT" not in env:
-        env["IQA_DATA_ROOT"] = str(data_root) if data_root else "/tmp/iqa_datasets"
+        env["IQA_DATA_ROOT"] = str(data_root) if data_root else str(scratch_dir() / "iqa_datasets")
     print("IQA_DATA_ROOT for the command:", env["IQA_DATA_ROOT"], flush=True)
     print("$", cfg["command"], flush=True)
     subprocess.run(
