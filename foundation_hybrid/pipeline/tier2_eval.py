@@ -49,9 +49,12 @@ def compute_from_cache(cache, config):
                 steepness = config.get('gate_steepness', 4.0)
                 threshold = config.get('gate_threshold', 0.70)
                 gate_dino = 1 / (1 + np.exp(-steepness * (nu - threshold)))
-                w_d = 0.35 + 0.30 * gate_dino
-                w_g = 0.50 - 0.30 * gate_dino
-                w_p = 0.15
+                gate_w_d_range = config.get('gate_w_d_range', (0.35, 0.65))
+                gate_w_g_range = config.get('gate_w_g_range', (0.50, 0.20))
+                w_p = config.get('gate_w_p', 0.15)
+                
+                w_d = gate_w_d_range[0] + (gate_w_d_range[1] - gate_w_d_range[0]) * gate_dino
+                w_g = gate_w_g_range[0] + (gate_w_g_range[1] - gate_w_g_range[0]) * gate_dino
             else:
                 w_d, w_g, w_p = config.get('fixed_weights', (1/3, 1/3, 1/3))
                 
@@ -101,6 +104,11 @@ def run_tier2_evaluations(cache_dir="raw/", out_csv=None, num_samples=None, seed
         {"id": "D3_gate_thresh_06", "use_gate": True, "gate_threshold": 0.60},
         {"id": "D4_gate_steep_2", "use_gate": True, "gate_steepness": 2.0},
         {"id": "D5_gate_steep_8", "use_gate": True, "gate_steepness": 8.0},
+        
+        # Group F: DISTS Boost Gating
+        {"id": "F1_dists_boost_20", "use_gate": True, "gate_w_p": 0.20, "gate_w_d_range": (0.3294, 0.6118), "gate_w_g_range": (0.4706, 0.1882)},
+        {"id": "F2_dists_boost_30", "use_gate": True, "gate_w_p": 0.30, "gate_w_d_range": (0.2882, 0.5353), "gate_w_g_range": (0.4118, 0.1647)},
+        {"id": "F3_dists_boost_40", "use_gate": True, "gate_w_p": 0.40, "gate_w_d_range": (0.2471, 0.4588), "gate_w_g_range": (0.3529, 0.1412)},
         
         # Group E: Multi-Scale Views
         {"id": "E1_global_only", "use_gate": True, "view_weights": (1.0, 0.0, 0.0)},
