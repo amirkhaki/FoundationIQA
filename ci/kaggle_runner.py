@@ -122,6 +122,31 @@ def extract_iqa_tars(src, dest, command):
     return done
 
 
+def find_tier1_cache_sources(base=pathlib.Path("/kaggle/input"), max_depth=6):
+    """Find directories under /kaggle/input holding Tier-1 cache output (*_cache.npy, written
+    by foundation_hybrid.pipeline.tier1_cache), wherever Kaggle mounted the attached kernel.
+    Bounded depth, and doesn't descend into a matching directory (a cache dir has few files,
+    so this is cheap unlike the dataset search this mirrors)."""
+    found = []
+
+    def visit(d, depth):
+        if any(d.glob("*_cache.npy")):
+            found.append(d)
+            return
+        if depth >= max_depth:
+            return
+        try:
+            children = sorted(c for c in d.iterdir() if c.is_dir())
+        except OSError:
+            return
+        for c in children:
+            visit(c, depth + 1)
+
+    if base.exists():
+        visit(base, 0)
+    return found
+
+
 write_meta()  # written first, so even an early failure leaves a matching meta behind
 t0 = time.time()
 try:
@@ -161,6 +186,58 @@ try:
         subprocess.run("find /kaggle/input -maxdepth 4 -type d 2>/dev/null | head -60", shell=True)
     meta["iqa_data_root"] = str(data_root) if data_root else None
 
+    # Tier-1 cache(s) (foundation_hybrid.pipeline.tier1_cache output), attached via
+    # kernel_sources (typically the kaggle-tier1.yml kernel). Several sources can be
+    # attached at once (e.g. two Tier-1 runs that cached different dataset subsets); their
+    # *_cache.npy files are merged into one directory. If the same dataset appears in more
+    # than one source, the first one found wins and the rest are reported, never silently
+    # mixed. Each source's own run_meta.json (written by this same script, since it's what
+    # produced the cache) is copied into THIS run's meta, so a Tier-2 result stays
+    # traceable back to the commit that produced the cache it used.
+    tier1_dirs = find_tier1_cache_sources()
+    tier1_cache_dir = None
+    if tier1_dirs:
+        tier1_cache_dir = scratch_dir() / "tier1_cache"
+        tier1_cache_dir.mkdir(parents=True, exist_ok=True)
+        provenance = []
+        for d in tier1_dirs:
+            info = {"dir": str(d), "datasets": []}
+            rm = d / "run_meta.json"
+            if rm.is_file():
+                try:
+                    j = json.loads(rm.read_text())
+                    info.update({
+                        "commit": j.get("commit_verified") or j.get("commit"),
+                        "command": j.get("command"),
+                        "status": j.get("status"),
+                    })
+                except (OSError, ValueError) as e:
+                    info["run_meta_error"] = repr(e)
+            for f in sorted(d.glob("*_cache.npy")):
+                dest = tier1_cache_dir / f.name
+                if dest.exists():
+                    print(f"WARNING: {f.name} found in more than one Tier-1 source; "
+                          f"keeping the first, ignoring {f}", flush=True)
+                    continue
+                shutil.copy2(f, dest)
+                info["datasets"].append(f.stem.replace("_cache", ""))
+            provenance.append(info)
+        meta["tier1_provenance"] = provenance
+        print(f"TIER1_CACHE_DIR: {tier1_cache_dir}", flush=True)
+        for info in provenance:
+            print(f"  from {info['dir']}: commit={info.get('commit')} "
+                  f"datasets={info['datasets']}", flush=True)
+    meta["tier1_cache_dir"] = str(tier1_cache_dir) if tier1_cache_dir else None
+    # A command that references $TIER1_CACHE_DIR (the Tier-2 default does) but finds
+    # nothing would otherwise fail confusingly later (an empty results CSV, or a
+    # FileNotFoundError deep in pandas) - catch it here with a clear message instead.
+    if "TIER1_CACHE_DIR" in cfg["command"] and tier1_cache_dir is None:
+        raise RuntimeError(
+            "command references $TIER1_CACHE_DIR but no Tier-1 cache (*_cache.npy) was found "
+            "under /kaggle/input - attach the tier1-cache kernel as a kernel source "
+            "(kaggle-tier2.yml does this by default) and make sure it has a successful run"
+        )
+
     # --- 3. install + record the environment ---------------------------------
     sh([sys.executable, "-m", "pip", "install", "-q", "-e", str(SRC)])
     try:
@@ -187,6 +264,10 @@ try:
     if "IQA_DATA_ROOT" not in env:
         env["IQA_DATA_ROOT"] = str(data_root) if data_root else str(scratch_dir() / "iqa_datasets")
     print("IQA_DATA_ROOT for the command:", env["IQA_DATA_ROOT"], flush=True)
+    if tier1_cache_dir is not None and "TIER1_CACHE_DIR" not in env:
+        env["TIER1_CACHE_DIR"] = str(tier1_cache_dir)
+    if "TIER1_CACHE_DIR" in env:
+        print("TIER1_CACHE_DIR for the command:", env["TIER1_CACHE_DIR"], flush=True)
     print("$", cfg["command"], flush=True)
     subprocess.run(
         ["bash", "-eo", "pipefail", "-c", cfg["command"]],
@@ -206,6 +287,20 @@ finally:
               "Use --data-root / IQA_DATA_ROOT to keep datasets elsewhere.", flush=True)
         shutil.rmtree(stray, ignore_errors=True)
         meta["removed_stray_datasets_dir"] = True
+    # What will actually be kept as this kernel's output (and, from there, pulled into a
+    # GitHub artifact and/or attached to another kernel via kernel_sources).
+    out_files = out_bytes = 0
+    for r, _, names in os.walk(WORK):
+        for n in names:
+            out_files += 1
+            try:
+                out_bytes += os.path.getsize(os.path.join(r, n))
+            except OSError:
+                pass
+    meta["output_files"] = out_files
+    meta["output_bytes"] = out_bytes
+    print(f"kernel output: {out_files} files, {out_bytes / 1e9:.2f} GB", flush=True)
+
     meta["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     meta["wall_seconds"] = round(time.time() - t0, 1)
     write_meta()

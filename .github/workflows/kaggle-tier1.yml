@@ -1,0 +1,56 @@
+name: kaggle-tier1
+
+# Tier-1 caching: run the (slow, GPU) model once per ARCHITECTURE CHANGE and cache its raw
+# per-image outputs. Run this whenever you change arch.py (or anything the model forward
+# pass depends on) and commit it; then iterate on ablation configs against the cache with
+# kaggle-tier2.yml, without paying for the GPU forward pass again.
+#
+# Always pushes to the SAME kernel slug ("foundationiqa-tier1-cache"), so kaggle-tier2.yml
+# can attach its latest saved output as a kernel source and find the cache automatically
+# (ci/kaggle_runner.py searches /kaggle/input for *_cache.npy and exports TIER1_CACHE_DIR).
+# Every push overwrites the previous cache: only the latest Tier-1 run is available to
+# Tier-2 at any time. run_meta.json (written into the cache output) records which commit
+# and command produced it, and kaggle-tier2.yml copies that provenance into its own
+# run_meta.json so you can always see which Tier-1 run a given Tier-2 result came from.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Shell command to run on Kaggle. Default: Tier-1 caching only (--skip-eval), no GPU forward pass wasted on Tier-2's config sweep."
+        required: true
+        default: "python -m foundation_hybrid.run_ablations --no-regression --skip-eval --datasets LIVE CSIQ TID2013 KADID10k PIPAL --out-dir /kaggle/working"
+
+concurrency:
+  group: kaggle-tier1
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: ./.github/actions/kaggle-run
+        with:
+          kaggle_owner: ${{ vars.KAGGLE_USERNAME || secrets.KAGGLE_USERNAME }}
+          kaggle_token: ${{ secrets.KAGGLE_API_TOKEN }}
+          slug: foundationiqa-tier1-cache
+          command: ${{ inputs.command }}
+          enable_gpu: "true"
+          # Needs the IQA image datasets to compute the cache from (see ci/kaggle_prepare_datasets.py).
+          dataset_sources: ${{ vars.KAGGLE_DATASET_SOURCES || '[]' }}
+          kernel_sources: ${{ vars.KAGGLE_KERNEL_SOURCES || '[]' }}
+          artifact_name: kaggle-tier1-meta-${{ github.sha }}-${{ github.run_id }}
+          # The cache itself (*_cache.npy, can run to several GB) stays on Kaggle and reaches
+          # Tier-2 via kernel_sources; only bring the small provenance files back to GitHub.
+          artifact_paths: |
+            out/run_meta.json
+            out/*.log

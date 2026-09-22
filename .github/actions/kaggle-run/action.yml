@@ -1,0 +1,198 @@
+name: "Run on Kaggle"
+description: >
+  Pushes ci/kaggle_runner.py (from the calling job's checkout) as a Kaggle script
+  kernel, runs `command` there against the exact commit being built, waits for it,
+  downloads its output, and uploads that as a GitHub artifact. Shared by
+  kaggle-run.yml, kaggle-tier1.yml and kaggle-tier2.yml so the push/poll/download
+  logic - the part most worth getting right once - lives in one place.
+  Requires actions/checkout to have already run in the calling job.
+
+inputs:
+  kaggle_owner:
+    description: "Kaggle username (the 'me' in me/slug)"
+    required: true
+  kaggle_token:
+    description: "Kaggle API token, e.g. secrets.KAGGLE_API_TOKEN"
+    required: true
+  slug:
+    description: "Kernel slug/title. Fixed per workflow so later runs update the same kernel (needed for kernel_sources chaining) instead of creating a new one."
+    required: true
+  command:
+    description: "Shell command to run on Kaggle, cwd=/kaggle/working, repo already cloned + pip installed"
+    required: true
+  enable_gpu:
+    description: "'true' or 'false'"
+    default: "true"
+  dataset_sources:
+    description: 'JSON list of "owner/slug" Kaggle Datasets to attach'
+    default: "[]"
+  kernel_sources:
+    description: 'JSON list of "owner/slug" Kaggle Notebooks whose output to attach'
+    default: "[]"
+  artifact_name:
+    description: "Name for the uploaded GitHub artifact"
+    required: true
+  artifact_paths:
+    description: "path: value for actions/upload-artifact (which downloaded files to keep on GitHub's side)"
+    default: "out/"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Kaggle CLI
+      shell: bash
+      run: pip install "kaggle>=1.8.2"   # first version I found confirmed working with KAGGLE_API_TOKEN
+
+    - name: Check credentials are configured
+      shell: bash
+      env:
+        HAVE_TOKEN: ${{ inputs.kaggle_token != '' }}
+        KAGGLE_OWNER: ${{ inputs.kaggle_owner }}
+      run: |
+        [ "$HAVE_TOKEN" = "true" ] || { echo "::error::KAGGLE_API_TOKEN was not passed to the kaggle-run action (repo secret missing?)"; exit 1; }
+        [ -n "$KAGGLE_OWNER" ] || { echo "::error::set the repository variable KAGGLE_USERNAME to your Kaggle username"; exit 1; }
+
+    - name: Build kernel bundle
+      shell: bash
+      env:
+        KAGGLE_OWNER: ${{ inputs.kaggle_owner }}
+        SLUG: ${{ inputs.slug }}
+        IN_COMMAND: ${{ inputs.command }}
+        ENABLE_GPU: ${{ inputs.enable_gpu }}
+        DATASET_SOURCES: ${{ inputs.dataset_sources }}
+        KERNEL_SOURCES: ${{ inputs.kernel_sources }}
+      run: |
+        mkdir -p kaggle_push
+        python - <<'PY'
+        import json, os, pathlib, pprint
+        cfg = {
+            "repo": os.environ["GITHUB_REPOSITORY"],
+            "sha": os.environ["GITHUB_SHA"],
+            "ref": os.environ["GITHUB_REF_NAME"],
+            "github_run_id": os.environ["GITHUB_RUN_ID"],
+            "command": os.environ["IN_COMMAND"],
+        }
+        src = pathlib.Path("ci/kaggle_runner.py").read_text()
+        pathlib.Path("kaggle_push/script.py").write_text(
+            "RUN_CONFIG = " + pprint.pformat(cfg) + "\n\n" + src)   # pformat, not json: needs to be valid Python (True/False)
+        meta = {
+            "id": os.environ["KAGGLE_OWNER"] + "/" + os.environ["SLUG"],
+            "title": os.environ["SLUG"],
+            "code_file": "script.py",
+            "language": "python",
+            "kernel_type": "script",
+            "is_private": "true",
+            "enable_gpu": os.environ["ENABLE_GPU"],
+            "enable_internet": "true",
+            "dataset_sources": json.loads(os.environ["DATASET_SOURCES"]),
+            "competition_sources": [],
+            "kernel_sources": json.loads(os.environ["KERNEL_SOURCES"]),
+            "model_sources": [],
+        }
+        pathlib.Path("kaggle_push/kernel-metadata.json").write_text(json.dumps(meta, indent=2))
+        PY
+
+    - name: Refuse to start while a previous run of this kernel is still active
+      shell: bash
+      env:
+        KAGGLE_API_TOKEN: ${{ inputs.kaggle_token }}
+        KAGGLE_OWNER: ${{ inputs.kaggle_owner }}
+        SLUG: ${{ inputs.slug }}
+      run: |
+        st=$(kaggle kernels status "$KAGGLE_OWNER/$SLUG" 2>&1 || true)
+        echo "$st"
+        # tolerant of both `"KernelWorkerStatus.RUNNING"` and a bare `"running"`
+        state=$(sed -nE 's/.*has status "?([A-Za-z_.]+)"?.*/\1/p' <<<"$st" | head -1 | sed 's/.*\.//' | tr a-z A-Z || true)
+        if [ "$state" = RUNNING ] || [ "$state" = QUEUED ]; then
+          echo "::error::a previous run of $KAGGLE_OWNER/$SLUG is still active"
+          exit 1
+        fi
+
+    - name: Push kernel (this starts the run)
+      shell: bash
+      env:
+        KAGGLE_API_TOKEN: ${{ inputs.kaggle_token }}
+      run: kaggle kernels push -p kaggle_push
+
+    - name: Wait for the Kaggle run and download its output
+      shell: bash
+      env:
+        KAGGLE_API_TOKEN: ${{ inputs.kaggle_token }}
+        KAGGLE_OWNER: ${{ inputs.kaggle_owner }}
+        SLUG: ${{ inputs.slug }}
+      run: |
+        ID="$KAGGLE_OWNER/$SLUG"
+        mkdir -p out
+        seen_active=0
+        unknown=0
+        SECONDS=0
+        sleep 45
+        while :; do
+          st=$(kaggle kernels status "$ID" 2>&1 || true)
+          echo "[$(date -u +%H:%M:%S)] $st"
+          state=$(sed -nE 's/.*has status "?([A-Za-z_.]+)"?.*/\1/p' <<<"$st" | head -1 | sed 's/.*\.//' | tr a-z A-Z || true)
+          # Bad token / unexpected CLI output would otherwise loop until the job timeout.
+          if [ -z "$state" ]; then
+            unknown=$((unknown + 1))
+            if [ "$unknown" -ge 10 ]; then
+              echo "::error::cannot read a run status from the Kaggle CLI (auth problem or unexpected output?). Last output: $st"
+              exit 1
+            fi
+          else
+            unknown=0
+          fi
+          case "$state" in
+            RUNNING|QUEUED)
+              seen_active=1
+              ;;
+            COMPLETE|ERROR|CANCEL_REQUESTED|CANCEL_ACKNOWLEDGED)
+              rm -rf out && mkdir out
+              kaggle kernels output "$ID" -p out || true
+              # Right after a push, status can still describe the PREVIOUS run.
+              # run_meta.json carries our GITHUB_RUN_ID, so it tells us whose output this is.
+              if [ "$(jq -r .github_run_id out/run_meta.json 2>/dev/null)" = "$GITHUB_RUN_ID" ]; then
+                if [ "$state" = "COMPLETE" ]; then exit 0; fi
+                echo "::error::Kaggle run ended with $state"
+                exit 1
+              fi
+              if [ "$seen_active" = 1 ] || [ "$SECONDS" -gt 900 ]; then
+                echo "::error::Kaggle run ended ($state) without a matching run_meta.json - check the log in the artifact"
+                exit 1
+              fi
+              echo "status looks stale (previous run), waiting"
+              ;;
+          esac
+          sleep 60
+        done
+
+    - name: Job summary
+      shell: bash
+      if: always()
+      env:
+        IN_COMMAND: ${{ inputs.command }}
+        SLUG: ${{ inputs.slug }}
+      run: |
+        {
+          echo "### Kaggle run: $SLUG"
+          echo "- commit: \`$GITHUB_SHA\` (\`$GITHUB_REF_NAME\`)"
+          echo "- command: \`$IN_COMMAND\`"
+          if [ -f out/run_meta.json ]; then
+            echo '```json'; cat out/run_meta.json; echo; echo '```'
+          fi
+          if [ -f out/master_results.csv ]; then
+            echo "#### master_results.csv"
+            echo '```'; cat out/master_results.csv; echo '```'
+          fi
+          if [ -f out/master_results_diagnostics.txt ]; then
+            echo "#### Gate Diagnostics"
+            echo '```'; cat out/master_results_diagnostics.txt; echo '```'
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # if: always() so the log and run_meta.json are kept even when the run failed
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ inputs.artifact_paths }}
+        if-no-files-found: warn

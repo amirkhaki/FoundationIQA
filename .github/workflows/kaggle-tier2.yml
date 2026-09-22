@@ -1,0 +1,72 @@
+name: kaggle-tier2
+
+# Tier-2 evaluation: sweep ablation configs against a Tier-1 cache WITHOUT re-running the
+# model, so this is fast and GPU-free. Run this to iterate on the Tier-2 configs list, the
+# gate formula, weights, etc. - anything that only post-processes cached values.
+#
+# Attaches the latest kaggle-tier1.yml output ("foundationiqa-tier1-cache") as a kernel
+# source. ci/kaggle_runner.py finds it under /kaggle/input, extracts/merges it if needed,
+# and exports TIER1_CACHE_DIR - reference that in --out-dir so you don't have to know the
+# exact mount path. Its own run_meta.json records which Tier-1 commit produced the cache
+# this run used, so every Tier-2 result stays traceable back to the Tier-1 run (and commit)
+# that produced its inputs.
+#
+# If you're evaluating a cache from a run OTHER than the latest kaggle-tier1.yml push (e.g.
+# comparing two architectures), set extra_kernel_sources to that kernel instead/as well.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Shell command to run on Kaggle. Default: Tier-2 evaluation only (--skip-cache), reading $TIER1_CACHE_DIR.'
+        required: true
+        default: 'python -m foundation_hybrid.run_ablations --no-regression --skip-cache --out-dir "$TIER1_CACHE_DIR" --out-csv /kaggle/working/master_results.csv'
+      extra_kernel_sources:
+        description: 'Extra kernel(s) to attach, as a JSON list of "owner/slug" (in ADDITION to the tier1-cache kernel), e.g. to compare a cache from a different Tier-1 run: ["you/foundationiqa-tier1-cache-v2"]'
+        required: true
+        default: "[]"
+
+concurrency:
+  group: kaggle-tier2
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # tier-2 is a numpy/pandas sweep over the cache, not a model forward pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Merge kernel sources
+        id: sources
+        shell: bash
+        env:
+          OWNER: ${{ vars.KAGGLE_USERNAME || secrets.KAGGLE_USERNAME }}
+          EXTRA: ${{ inputs.extra_kernel_sources }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          extra = json.loads(os.environ["EXTRA"])
+          merged = [f'{os.environ["OWNER"]}/foundationiqa-tier1-cache'] + [s for s in extra if s]
+          print("json=" + json.dumps(merged))
+          PY
+
+      - uses: ./.github/actions/kaggle-run
+        with:
+          kaggle_owner: ${{ vars.KAGGLE_USERNAME || secrets.KAGGLE_USERNAME }}
+          kaggle_token: ${{ secrets.KAGGLE_API_TOKEN }}
+          slug: foundationiqa-tier2-eval
+          command: ${{ inputs.command }}
+          enable_gpu: "false"   # no model forward pass here - starts faster, spends no GPU quota
+          dataset_sources: "[]"   # tier-2 never touches images, only the cached numbers
+          kernel_sources: ${{ steps.sources.outputs.json }}
+          artifact_name: kaggle-tier2-results-${{ github.sha }}-${{ github.run_id }}
+          # small: the CSV, diagnostics and run_meta.json (which now also records which
+          # tier-1 run/commit the cache came from)
+          artifact_paths: out/
