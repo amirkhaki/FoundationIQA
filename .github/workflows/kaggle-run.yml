@@ -13,7 +13,7 @@ on:
       command:
         description: "Shell command to run on Kaggle (cwd=/kaggle/working, repo already cloned + pip installed). Anything left in /kaggle/working becomes the artifact."
         required: true
-        default: "python -m foundation_hybrid.run_ablations --no-regression --datasets TID2013 --out-dir /tmp/raw"
+        default: "python -m foundation_hybrid.run_ablations --arch dino --datasets TID2013 --out-dir /tmp/raw"
 
 # One run of THIS workflow at a time. Runs a separate kernel from kaggle-tier1.yml /
 # kaggle-tier2.yml, so it does not queue behind (or block) those.

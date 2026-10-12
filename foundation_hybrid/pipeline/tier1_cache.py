@@ -6,14 +6,25 @@ import numpy as np
 from tqdm import tqdm
 from pyiqa.default_model_configs import DEFAULT_CONFIGS
 
-# Import to register the architecture
+# Import to register the architectures
 import foundation_hybrid.arch
+import foundation_hybrid.arch_dino
 
-def run_tier1_cache(datasets, output_dir="raw/", data_root=None, num_samples=None, seed=42, quiet=False):
+# arch name -> registered pyiqa arch type
+ARCHS = {
+    'hybrid': 'FoundationHybrid',
+    'dino': 'FoundationDino',
+}
+
+def run_tier1_cache(datasets, output_dir="raw/", data_root=None, num_samples=None, seed=42, quiet=False,
+                    arch="hybrid"):
     """
     Tier-1 Caching Script.
     Runs the model with `return_cache=True` and saves raw outputs (DISTS/Gram/Cosine scores)
     for every image pair so we can perform fast post-hoc ablation studies.
+
+    arch: 'hybrid' (DINO + CNN experts, cache has per-view {'dino', 'cnn'}) or
+          'dino' (DINO expert only, cache has per-view {'dino'}).
 
     data_root: where pyiqa looks for (and, if missing, downloads) the datasets.
     Falls back to $IQA_DATA_ROOT, then pyiqa's own default "./datasets" (relative to
@@ -25,16 +36,19 @@ def run_tier1_cache(datasets, output_dir="raw/", data_root=None, num_samples=Non
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Inject plugin to PyIQA
-    DEFAULT_CONFIGS['foundation_hybrid_cache'] = {
+    if arch not in ARCHS:
+        raise ValueError(f"Unknown arch '{arch}'. Choose from {sorted(ARCHS)}")
+    metric_name = f'foundation_{arch}_cache'
+    DEFAULT_CONFIGS[metric_name] = {
         'metric_opts': {
-            'type': 'FoundationHybrid',
+            'type': ARCHS[arch],
             'return_cache': True,
         },
         'metric_mode': 'FR',
         'lower_better': False,
     }
     
-    model = pyiqa.create_metric('foundation_hybrid_cache', device=device)
+    model = pyiqa.create_metric(metric_name, device=device)
     
     for dataset_name in datasets:
         print(f"Caching dataset: {dataset_name}")
@@ -76,11 +90,11 @@ def run_tier1_cache(datasets, output_dir="raw/", data_root=None, num_samples=Non
             for b in range(B):
                 cpu_cache = {}
                 for view, view_cache in cache.items():
-                    cpu_cache[view] = {"dino": [], "cnn": []}
-                    for l in view_cache["dino"]:
-                        cpu_cache[view]["dino"].append({k: v[b].cpu().numpy() for k, v in l.items()})
-                    for l in view_cache["cnn"]:
-                        cpu_cache[view]["cnn"].append({k: v[b].cpu().numpy() for k, v in l.items()})
+                    # one list of per-layer dicts per expert ('dino' and, for hybrid, 'cnn')
+                    cpu_cache[view] = {
+                        expert: [{k: v[b].cpu().numpy() for k, v in l.items()} for l in layers]
+                        for expert, layers in view_cache.items()
+                    }
                         
                 mos_val = mos_batch[b].item() if isinstance(mos_batch, torch.Tensor) else mos_batch[b]
                 dtype_val = dist_type_batch[b] if isinstance(dist_type_batch, list) or isinstance(dist_type_batch, tuple) else dist_type_batch

@@ -18,7 +18,7 @@ on:
       command:
         description: "Shell command to run on Kaggle. Default: Tier-1 caching only (--skip-eval), no GPU forward pass wasted on Tier-2's config sweep."
         required: true
-        default: "python -m foundation_hybrid.run_ablations --no-regression --skip-eval --datasets LIVE CSIQ TID2013 KADID10k PIPAL --out-dir /kaggle/working"
+        default: "python -m foundation_hybrid.run_ablations --arch dino --skip-eval --datasets LIVE CSIQ TID2013 KADID10k PIPAL --out-dir /kaggle/working"
 
 concurrency:
   group: kaggle-tier1

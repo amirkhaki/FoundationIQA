@@ -14,6 +14,7 @@ dependencies = [
 
 [project.entry-points."pyiqa.archs"]
 foundation_hybrid = "foundation_hybrid.arch:register"
+foundation_dino = "foundation_hybrid.arch_dino:register"
 
 [project.scripts]
 run-ablations = "foundation_hybrid.run_ablations:main"

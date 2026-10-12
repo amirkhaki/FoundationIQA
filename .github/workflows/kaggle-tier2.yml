@@ -19,7 +19,7 @@ on:
       command:
         description: 'Shell command to run on Kaggle. Default: Tier-2 evaluation only (--skip-cache), reading $TIER1_CACHE_DIR.'
         required: true
-        default: 'python -m foundation_hybrid.run_ablations --no-regression --skip-cache --out-dir "$TIER1_CACHE_DIR" --out-csv /kaggle/working/master_results.csv'
+        default: 'python -m foundation_hybrid.run_ablations --arch dino --skip-cache --out-dir "$TIER1_CACHE_DIR" --out-csv /kaggle/working/master_results.csv'
       extra_kernel_sources:
         description: 'Extra kernel(s) to attach, as a JSON list of "owner/slug" (in ADDITION to the tier1-cache kernel), e.g. to compare a cache from a different Tier-1 run: ["you/foundationiqa-tier1-cache-v2"]'
         required: true
